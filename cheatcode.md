@@ -59,3 +59,84 @@ docker compose up --build   THEN REBUILD EVERYTHING   (somethings might not buil
 tested the app using localhost:8000 (if the frontend and backend images is not runningthe site wount show and if the backend image is not running the logs wont show or record requests)
 
 next we make use of docker hub to store our built images so it can be pulled by other machines like linux VM for free rather than using azure acr registtras.(prefared by startups tho)
+
+touch .gitignore
+git add .
+git commit -m "Initial commit: FocusFlow 3-tier app with Docker setup"
+git log --oneline -1      NOW WE CREATED THE GITIGNORE ROOT FILE AND HEN ADD,COMMIT AND SHOW LOGS OF WHAT WE DID WHEN WE COMMIT, WHILE THE initial commit will give us a 7character(b1e46eb) that we will use as the image tag.
+
+docker tag focusflow-capstone-backend glaciercodes/focusflow-backend:b1e46eb
+docker tag focusflow-capstone-backend glaciercodes/focusflow-backend:latest
+docker push glaciercodes/focusflow-backend:b1e46eb
+docker push glaciercodes/focusflow-backend:latest
+
+docker tag focusflow-capstone-frontend glaciercodes/focusflow-frontend:b1e46eb
+docker tag focusflow-capstone-frontend glaciercodes/focusflow-frontend:latest
+docker push glaciercodes/focusflow-frontend:b1e46eb
+docker push glaciercodes/focusflow-frontend:latest      //use the SHA hash from git log to suffix out retaged images so we can easily identify what code made an image eg git checkout b1e46eb which shows u the files and folders that specific image has when it was created.   ALSO WE RETAGGED THE FRONTEND AND BACKEND TWICE SO ONE b1e46eb GIVES US A PERMANENT UNIQUE VERSION NAME TO TRACE CODE WHILE LATEST SHOWS THE NEWEST COD ECHANGES AND GETS OVERWRITEEN WHEN A NEW VERSION COMES OUT acts like git branchs.(git branch tacks changes made to your folder and git checkout b1e46eb -commit hash shows and pamently keep the exact folder and files that images contain)
+
+WE MAKE THE infra/provision-vm.sh file and wrote our bashscript, and run it with (chmod +x infra/provision-vm.sh && ./infra/provision-vm.sh) to our vm in a resource group, open two ports and then showed the public ip we will use to ssh into. might have issues creating so you check which regions are current available on standard b1s vm size eg az vm list-skus --size Standard_B1s --all --output table(regions showing none) if staying within free teir budget after upfgrading.
+
+ssh azureuser@9.205.154.124  ssh into the newnly created empty vm 
+
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER    //INSTALLED DOCKER AND DOCKERCOMPOSE ON THE FRESH UBUNTU VM, WHILE THE 2ND LINE LETS THE USER RUN DOCKER WITHOUT TYPING SUDU EVERYTIME WHICH TAKES EFFECT AFTER YOU LOG OUT
+
+exit
+ssh azureuser@9.205.154.124
+docker --version
+docker compose version     //exit FROM THE VM SSH IN AGAIN AND CHECK BOTH DOCKER AND DOCKER COMPOSE ARE INSTALLED ON THE VM.
+
+NEXT EXIT YOUR VM AND RUN scp docker-compose.yml azureuser@9.205.154.124:~/docker-compose.yml    TO COPY THE DOCKERCOMPOSE FILE IN UR SOURCE CODE INTO THE VM MACHINE SINCE THE VM WILL PULL THE ALREADY BUILT IMAGE FROM DOCKER COMPOSE.
+
+create and docker-compose.prod.yml script so vm can pull from already built image(changing it from nuilg to image and making the port for this images to be access public) since it cant build from a source code which is not in out vm.
+
+scp docker-compose.prod.yml azureuser@9.205.154.124:~/docker-compose.yml
+scp database/init.sql azureuser@9.205.154.124:~/init.sql   //NOW COPY THE DOCKER-COMPOSE PROD FILE AND THE INIT.SQL FILE INTO SSH since db reference to it locally
+
+ssh azureuser@9.205.154.124
+docker compose up -d   //SSH INTO YOUR VM AND THEN pull UP THE already built images and THE POSTGRES IMAGES ALREADY AN INBUILT IMAGE from DOCKER HUB.
+
+docker compose ps
+curl http://localhost:5000/health   //CHECKED IF THE BUILD UP WAS SUCCESSFUL TO SHOW ALL IMAGES IN THE VM, AND THEN CURL THE HEALTH API TO BE SURE THE THREE LAYER ARE CONNECTED WHICH RETURNS STATUS:OK AND DB:CONNECTED.
+
+cat > .env << 'EOF'
+DB_USER=secretuser
+DB_PASSWORD=secretpass
+DB_NAME=secretname
+EOF                     //created a .env file to keep this exposed cred at the both yml files.
+
+echo ".env" >> .gitignore  //also dont forget to git ignore the .env file before pushing to github.
+
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}  //confirm replacing this frontend yml script at your source code before pushing to.
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      PORT: 5000 //and to your backend
+
+scp docker-compose.prod.yml azureuser@9.205.154.124:~/docker-compose.yml
+ssh azureuser@9.205.154.124    //be sure to update and replace the both updated files //now update and replace both file into your vm,
+
+
+cat > .env.example << 'EOF'
+DB_USER=secretuser
+DB_PASSWORD=secretpass
+DB_NAME=secretname
+EOF   
+docker compose up -d  //ssh into your vm and then create the .env file to store the cred, and then rerun the docker compose file
+
+grep -r "secretname" --include="*.yml" .    //use this script to check if there is your specific cred is exposed on any yml file
+
+
+
+gh auth status //CONFIRMED AM LOGGED IN ON GITHUB
+
+git remote add origin https://github.com/<your-username>/focusflow-capstone.git
+git branch -M main
+git push -u origin main  //add a remote to my git folder,coverted the master branch to main and then push the folder to my githuh main branch.
