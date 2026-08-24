@@ -468,6 +468,118 @@ git push -u origin main
 
 ---
 
+## Part 10 — GitHub Actions CI/CD pipeline
+
+Everything done manually in Part 5 (tag, push) and Part 7 (SSH, redeploy) is now automated. Every push to `main` triggers a full build → push → deploy → health-check cycle with no manual steps.
+
+### Step 10: Store credentials as GitHub Actions secrets (never in the workflow file)
+
+Via CLI, from the repo root:
+```bash
+gh secret set DOCKERHUB_USERNAME --body "glaciercodes"
+gh secret set DOCKERHUB_TOKEN --body "dckr_pat_..."
+gh secret set VM_HOST --body "9.205.154.124"
+gh secret set VM_USER --body "azureuser"
+gh secret set VM_SSH_KEY < ~/.ssh/id_rsa
+gh secret set DB_USER --body "focus_user"
+gh secret set DB_PASSWORD --body "changeme"
+gh secret set DB_NAME --body "focusflow"
+
+gh secret list   # confirm all 8 are present
+```
+
+**Important:** the Docker Hub access token must be generated with **Read & Write** scope (not the default Read-only), or the pipeline's push step will fail with `unauthorized: access token has insufficient scopes`. Verify a token actually works, including push permission, before trusting it as a secret:
+```bash
+echo "dckr_pat_..." | docker login --username glaciercodes --password-stdin
+docker push glaciercodes/focusflow-backend:scope-test   # should succeed, not just login
+```
+
+For the SSH key, confirm it's the exact key authorized on the VM before using it:
+```bash
+ssh -i ~/.ssh/id_rsa azureuser@9.205.154.124 "echo connected ok"
+```
+
+### Step 11: `.github/workflows/deploy.yml`
+
+```yaml
+name: Build, Push, Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get short commit hash
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            glaciercodes/focusflow-backend:${{ steps.vars.outputs.sha_short }}
+            glaciercodes/focusflow-backend:latest
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            glaciercodes/focusflow-frontend:${{ steps.vars.outputs.sha_short }}
+            glaciercodes/focusflow-frontend:latest
+
+      - name: Deploy to VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd ~
+            sed -i "s|glaciercodes/focusflow-backend:.*|glaciercodes/focusflow-backend:${{ steps.vars.outputs.sha_short }}|" docker-compose.yml
+            sed -i "s|glaciercodes/focusflow-frontend:.*|glaciercodes/focusflow-frontend:${{ steps.vars.outputs.sha_short }}|" docker-compose.yml
+            docker compose pull
+            docker compose up -d
+            sleep 5
+            curl -f http://localhost:5000/health || exit 1
+```
+
+Push it:
+```bash
+git add .github/workflows/deploy.yml
+git commit -m "Add GitHub Actions CI/CD pipeline: build, push, deploy"
+git push
+```
+
+### What happens on every successful push to `main`
+
+1. GitHub detects the push and starts the workflow automatically — no manual trigger.
+2. **Checkout** — a fresh temporary Ubuntu runner clones the exact repo state.
+3. **Get short commit hash** — automates `git rev-parse --short HEAD`, same version tag used manually in Part 5.
+4. **Docker Hub login** — authenticates with the scoped access token.
+5. **Build and push backend** — builds fresh from `backend/Dockerfile`, tags with both the commit hash and `latest`, pushes both.
+6. **Build and push frontend** — same for the two-stage frontend Dockerfile.
+7. **Deploy to VM via SSH** — logs into the VM, edits `docker-compose.yml` in place with `sed` to point at the new image tags, pulls, and restarts.
+8. **Health-check gate** — `curl -f http://localhost:5000/health`; if this fails, the whole pipeline fails loudly instead of leaving a silently broken deploy live.
+
+---
+
 ## Issues encountered and how they were solved
 
 | Issue | Cause | Fix |
@@ -478,6 +590,9 @@ git push -u origin main
 | `scp`/`ssh` failed with `Permission denied (publickey)` and "lost connection" | Was running `scp` **from inside** the VM's SSH session, trying to SSH into itself, instead of running it from the local machine | Exited back to the local terminal first, then ran `scp` from there to push files *to* the VM |
 | Credentials (`changeme`) hardcoded directly in both `docker-compose.yml` files | Fast local setup skipped proper secrets handling early on | Moved all credentials into a gitignored `.env` file, referenced via `${DB_USER}` etc. in both compose files, added `.env.example` as a template, and verified with `grep -r "changeme" --include="*.yml" .` before pushing |
 | `docker compose up -d` showed "Running" instead of recreating containers after editing the compose file | Compose only recreates a container if the config actually changed — the file still had the old hardcoded values when this was run the first time | Verified the compose file was truly edited, then ran `docker compose down && docker compose up -d` for a guaranteed clean recreation |
+| `curl http://localhost:5000/health` on the VM returned `Connection refused` (not even the simulated error) during a rollback drill | The `backend` service block in the VM's `docker-compose.yml` was missing its `ports:` mapping entirely — `docker compose ps` showed `5000/tcp` with no `0.0.0.0:5000->` host binding, meaning the port existed inside the container but was never published to the VM | Added `ports: ["5000:5000"]` back to the backend service on the VM, ran `docker compose up -d` to apply it, verified `/health` returned `ok` again, then checked and fixed the same block in the local `docker-compose.prod.yml` so the bug wouldn't reappear on the next deploy |
+| `git add .github/workflows/deploy.yml` failed with `fatal: pathspec did not match any files`, and the file stayed empty | Was `cd`'d **inside** `.github/workflows/` when running `git add`, so Git resolved the path relative to that folder (looking for a nested `.github/workflows/.github/workflows/...`). Separately, `touch deploy.yml` only creates an empty file — the actual YAML content was never written to it | Ran `pwd` to confirm being back at the repo root before touching Git, used `cat > .github/workflows/deploy.yml << 'EOF' ... EOF` to write the real content in one shot, verified with `cat` before committing |
+| GitHub Actions run failed at the "Build and push backend" step: `unauthorized: access token has insufficient scopes` | The Docker Hub access token used for `DOCKERHUB_TOKEN` was generated with the default **Read-only** scope — enough to log in, not enough to push new images | Generated a new Docker Hub access token with **Read & Write** scope, verified it could actually push (not just log in) from the local machine first, then replaced only the `DOCKERHUB_TOKEN` secret with `gh secret set` and re-triggered the pipeline with an empty commit |
 
 ---
 
