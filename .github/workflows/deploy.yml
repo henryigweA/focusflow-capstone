@@ -1,0 +1,56 @@
+name: Build, Push, Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get short commit hash
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push backend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            glaciercodes/focusflow-backend:${{ steps.vars.outputs.sha_short }}
+            glaciercodes/focusflow-backend:latest
+
+      - name: Build and push frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            glaciercodes/focusflow-frontend:${{ steps.vars.outputs.sha_short }}
+            glaciercodes/focusflow-frontend:latest
+
+      - name: Deploy to VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            cd ~
+            sed -i "s|glaciercodes/focusflow-backend:.*|glaciercodes/focusflow-backend:${{ steps.vars.outputs.sha_short }}|" docker-compose.yml
+            sed -i "s|glaciercodes/focusflow-frontend:.*|glaciercodes/focusflow-frontend:${{ steps.vars.outputs.sha_short }}|" docker-compose.yml
+            docker compose pull
+            docker compose up -d
+            sleep 5
+            curl -f http://localhost:5000/health || exit 1
