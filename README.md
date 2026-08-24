@@ -16,7 +16,7 @@ This satisfies the **"Dockerized 3-Tier App with Full CI/CD"** capstone project 
 
 ---
 
-## Part 1 — Understand the app before touching infrastructure
+## Part 1 — Understand the app before touching infrastructure.
 
 Before writing a single Dockerfile, the app was tested locally exactly as it runs, to understand what it actually needs.
 
