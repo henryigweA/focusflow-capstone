@@ -15,8 +15,12 @@ app.use(express.json());
 // database. Deploy pipelines / load balancers should check this
 // before sending real traffic to a new version.
 app.get('/health', async (req, res) => {
-  return res.status(500).json({ status: 'error', db: 'simulated failure' });
-  // original code below is now unreachable — that's intentional for this drill
+  try {
+    await pool.query('SELECT 1');
+    res.status(200).json({ status: 'ok', db: 'connected' });
+  } catch (err) {
+    res.status(503).json({ status: 'error', db: 'unreachable' });
+  }
 });
 
 app.use('/api/sessions', sessionsRouter);
