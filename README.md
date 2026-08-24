@@ -1,8 +1,8 @@
 # FocusFlow — DevOps Deployment Journey
 
-This README documents, step by step, how the FocusFlow 3-tier app (React frontend, Node/Express backend, Postgres database) was taken from raw source code to a live, publicly reachable deployment on an Azure Linux VM — using Docker, Docker Compose, and versioned image tagging. It's written so a beginner can follow the exact same path, including the real problems hit along the way and how each one was fixed.
+This README documents, step by step, how the FocusFlow 3-tier app (React frontend, Node/Express backend, Postgres database) was taken from raw source code to a live, publicly reachable deployment on an Azure Linux VM, with a fully automated CI/CD pipeline — using Docker, Docker Compose, versioned image tagging, and GitHub Actions. It's written so a beginner can follow the exact same path, including every real problem hit along the way and how each one was fixed.
 
-This satisfies the **"Dockerized 3-Tier App with Full CI/CD"** capstone project (compulsory for all groups).
+**Status: Complete and submitted.** This satisfies the **"Dockerized 3-Tier App with Full CI/CD"** capstone project (compulsory for all groups).
 
 ---
 
@@ -10,13 +10,13 @@ This satisfies the **"Dockerized 3-Tier App with Full CI/CD"** capstone project 
 
 - Docker Desktop installed and running
 - Git installed, Git Bash (Windows) or any terminal
+- GitHub CLI (`gh`) installed and authenticated
 - An Azure account with the CLI (`az`) installed and logged in
 - A free Docker Hub account
-- A GitHub account
 
 ---
 
-## Part 1 — Understand the app before touching infrastructure.
+## Part 1 — Understand the app before touching infrastructure
 
 Before writing a single Dockerfile, the app was tested locally exactly as it runs, to understand what it actually needs.
 
@@ -111,7 +111,7 @@ USER node
 CMD ["node", "server.js"]
 ```
 
-`package*.json` is copied and installed **before** the rest of the source code — this lets Docker cache the slow `npm ci` layer across rebuilds, since it only reruns if dependencies actually change.
+`package*.json` is copied and installed **before** the rest of the source code — this lets Docker cache the slow `npm ci` layer across rebuilds, since it only reruns if dependencies actually change. `npm ci` is used instead of `npm install` specifically because `ci` installs exactly what's locked in `package-lock.json`, giving a reproducible build — `npm install` can silently drift to newer compatible versions and cause "works on my machine" surprises inside a container.
 
 Also add `backend/.dockerignore`:
 ```
@@ -256,7 +256,7 @@ Run everything:
 docker compose up --build
 ```
 
-Then open `http://localhost:8080` in a browser — this is the real end-to-end test (browser → nginx → backend → Postgres → back).
+Then open `http://localhost:8080` in a browser — this is the real end-to-end test (browser → nginx → backend → Postgres → back). If the frontend or backend containers aren't actually running, the site won't load; if only the backend is down, the frontend loads but shows no data and the backend logs show no incoming requests — a useful way to tell which layer is actually broken.
 
 ---
 
@@ -285,7 +285,11 @@ docker push glaciercodes/focusflow-frontend:b1e46eb
 docker push glaciercodes/focusflow-frontend:latest
 ```
 
-`git checkout b1e46eb` at any time shows exactly what code that image tag was built from — this is the actual "rollback with certainty" the brief asks for.
+**Why Docker Hub instead of Azure Container Registry (ACR):** free to store public images, no cloud provider lock-in, and it's the registry most startups actually default to for cost reasons — ACR is more common once a team is already deep in Azure-only tooling. Since this project is deliberately staying within free-tier limits, Docker Hub was the better fit.
+
+**Why retagging isn't duplicating storage:** `docker tag` doesn't copy any image data — it just points a second name at the same underlying layers. This was confirmed directly in the push output: the `b1e46eb` and `latest` pushes produced the **identical digest** (`sha256:14087b008cea...`), proving they're two labels on one physical image, not two separate uploads. `latest` moves to point at whatever's newest on the next push; `b1e46eb` never moves — that permanence is what makes it usable for rollback, similar in spirit to a Git commit hash versus a moving branch pointer.
+
+`git checkout b1e46eb` at any time shows exactly what code that image tag was built from.
 
 ---
 
@@ -325,6 +329,12 @@ Only ports **22** (SSH, for us to deploy) and **80** (public HTTP) are opened �
 chmod +x infra/provision-vm.sh
 ./infra/provision-vm.sh
 ```
+
+If `Standard_B1s` is rejected with `SkuNotAvailable` for the chosen region, check which regions this subscription can actually use before retrying:
+```bash
+az vm list-skus --size Standard_B1s --all --output table
+```
+Look for a region showing no restriction, update `LOCATION`, and re-run.
 
 ---
 
@@ -383,6 +393,8 @@ services:
 volumes:
   pgdata:
 ```
+
+**Important:** this compose file is just configuration — it never "runs" by itself. It's only ever read by the `docker compose` command, which tells the real Docker engine what images to pull and how to wire them together. This is also why the VM's compose file has to be actively updated with each new image tag (see Part 10) — building and pushing a new image to Docker Hub doesn't automatically tell the VM anything; something has to rewrite that reference explicitly.
 
 Copy the compose file and schema up to the VM, then bring it up:
 
@@ -466,6 +478,8 @@ git push -u origin main
 
 `.env` is never staged (it's gitignored) — only `.env.example`, the Dockerfiles, both compose files, `nginx.conf`, and the provisioning script get committed.
 
+The `-u` flag on the first push matters: it links the local `main` branch to `origin/main` so every future push can just be `git push`, with no branch name needed.
+
 ---
 
 ## Part 10 — GitHub Actions CI/CD pipeline
@@ -485,7 +499,7 @@ gh secret set DB_USER --body "focus_user"
 gh secret set DB_PASSWORD --body "changeme"
 gh secret set DB_NAME --body "focusflow"
 
-gh secret list   # confirm all 8 are present
+gh secret list   # confirm all secrets are present
 ```
 
 **Important:** the Docker Hub access token must be generated with **Read & Write** scope (not the default Read-only), or the pipeline's push step will fail with `unauthorized: access token has insufficient scopes`. Verify a token actually works, including push permission, before trusting it as a secret:
@@ -498,6 +512,8 @@ For the SSH key, confirm it's the exact key authorized on the VM before using it
 ```bash
 ssh -i ~/.ssh/id_rsa azureuser@9.205.154.124 "echo connected ok"
 ```
+
+**Note on `DB_USER`/`DB_PASSWORD`/`DB_NAME` secrets:** the workflow below never actually references these — the VM already has its own permanent `.env` file (set up in Part 8) that `docker compose` reads automatically on every restart. The pipeline only swaps image tags and restarts containers; it doesn't touch database credentials. These three secrets are harmless to keep (useful if the pipeline is later extended to manage the VM's `.env` too) or safe to delete if unused.
 
 ### Step 11: `.github/workflows/deploy.yml`
 
@@ -580,6 +596,58 @@ git push
 
 ---
 
+## Part 11 — Rollback drill (mandatory deliverable)
+
+To prove the versioned tagging strategy actually enables a real rollback, a deliberate failure was introduced and then reverted.
+
+### Step 12: Simulate a broken deploy
+
+In `backend/server.js`, the `/health` route was temporarily forced to fail:
+```javascript
+app.get('/health', async (req, res) => {
+  return res.status(500).json({ status: 'error', db: 'simulated failure' });
+});
+```
+
+Committed and tagged as a new version:
+```bash
+git add .
+git commit -m "Simulate broken health check for rollback drill"
+git log --oneline -1     # new hash, e.g. <bad_hash>
+```
+
+Built and pushed the broken image:
+```bash
+cd backend
+docker build -t glaciercodes/focusflow-backend:<bad_hash> .
+docker push glaciercodes/focusflow-backend:<bad_hash>
+cd ..
+```
+
+### Step 13: Deploy the broken version and confirm the failure
+
+`docker-compose.yml` on the VM was updated to reference `<bad_hash>`, then:
+```bash
+docker compose pull
+docker compose up -d
+curl http://localhost:5000/health
+```
+Confirmed the simulated failure response — **screenshotted as evidence.**
+
+### Step 14: Roll back to the last known-good version
+
+`docker-compose.yml` reverted to `b1e46eb`:
+```bash
+docker compose pull
+docker compose up -d
+curl http://localhost:5000/health
+```
+Confirmed `{"status":"ok","db":"connected"}` — **screenshotted as evidence of successful rollback.**
+
+This is the concrete proof behind the brief's requirement: *"a fast, reliable way back to the last known-good version"* — rollback here is just redeploying a specific, permanent, previously-tested tag, not a special or risky procedure.
+
+---
+
 ## Issues encountered and how they were solved
 
 | Issue | Cause | Fix |
@@ -590,16 +658,25 @@ git push
 | `scp`/`ssh` failed with `Permission denied (publickey)` and "lost connection" | Was running `scp` **from inside** the VM's SSH session, trying to SSH into itself, instead of running it from the local machine | Exited back to the local terminal first, then ran `scp` from there to push files *to* the VM |
 | Credentials (`changeme`) hardcoded directly in both `docker-compose.yml` files | Fast local setup skipped proper secrets handling early on | Moved all credentials into a gitignored `.env` file, referenced via `${DB_USER}` etc. in both compose files, added `.env.example` as a template, and verified with `grep -r "changeme" --include="*.yml" .` before pushing |
 | `docker compose up -d` showed "Running" instead of recreating containers after editing the compose file | Compose only recreates a container if the config actually changed — the file still had the old hardcoded values when this was run the first time | Verified the compose file was truly edited, then ran `docker compose down && docker compose up -d` for a guaranteed clean recreation |
+| `scp: stat local "docker-compose.prod.yml": No such file or directory` | `touch docker-compose-prod.yml` created an **empty** file with a hyphen instead of a dot in the name (`docker-compose-prod.yml` vs the intended `docker-compose.prod.yml`), so the file `scp` looked for didn't exist | Recreated the file with the correct dot-separated name using a `cat > file << 'EOF' ... EOF` heredoc, which writes the real content in one step and avoids typos in the filename |
 | `curl http://localhost:5000/health` on the VM returned `Connection refused` (not even the simulated error) during a rollback drill | The `backend` service block in the VM's `docker-compose.yml` was missing its `ports:` mapping entirely — `docker compose ps` showed `5000/tcp` with no `0.0.0.0:5000->` host binding, meaning the port existed inside the container but was never published to the VM | Added `ports: ["5000:5000"]` back to the backend service on the VM, ran `docker compose up -d` to apply it, verified `/health` returned `ok` again, then checked and fixed the same block in the local `docker-compose.prod.yml` so the bug wouldn't reappear on the next deploy |
+| `gh repo create` reported `Unable to add remote "origin"`, then a second attempt failed with `GraphQL: Name already exists`, then `git push` failed with `no upstream branch` | The repo was actually created successfully the first time; the "unable to add remote" was just `gh` trying to add an already-existing remote a second time (harmless). The real gap was that the local `main` branch had never been pushed before, so Git had no upstream tracking set | Confirmed `origin` was already correctly set with `git remote -v`, then ran `git push --set-upstream origin main`, which both pushed the code and linked local `main` to `origin/main` for future plain `git push` commands |
 | `git add .github/workflows/deploy.yml` failed with `fatal: pathspec did not match any files`, and the file stayed empty | Was `cd`'d **inside** `.github/workflows/` when running `git add`, so Git resolved the path relative to that folder (looking for a nested `.github/workflows/.github/workflows/...`). Separately, `touch deploy.yml` only creates an empty file — the actual YAML content was never written to it | Ran `pwd` to confirm being back at the repo root before touching Git, used `cat > .github/workflows/deploy.yml << 'EOF' ... EOF` to write the real content in one shot, verified with `cat` before committing |
 | GitHub Actions run failed at the "Build and push backend" step: `unauthorized: access token has insufficient scopes` | The Docker Hub access token used for `DOCKERHUB_TOKEN` was generated with the default **Read-only** scope — enough to log in, not enough to push new images | Generated a new Docker Hub access token with **Read & Write** scope, verified it could actually push (not just log in) from the local machine first, then replaced only the `DOCKERHUB_TOKEN` secret with `gh secret set` and re-triggered the pipeline with an empty commit |
 
 ---
 
-## What's still outstanding for full capstone compliance
+## Submission checklist status
 
-- [ ] Full GitHub Actions CI/CD pipeline (build → push → SSH deploy)
-- [ ] A documented, tested rollback performed and screenshotted
-- [ ] Completed Phase 0 design worksheet (tier boundaries, tagging strategy, secrets plan — much of this is implicitly answered above)
-- [ ] Incident report (symptom → investigation → root cause → fix → design reflection)
-- [ ] Screenshots of the live deployment and successful/blocked scenarios
+| Requirement | Status |
+|---|---|
+| GitHub repo with clear folder structure | ✅ |
+| Dockerfiles, docker-compose.yml, GitHub Actions workflow, working from a clean clone | ✅ |
+| Full CI/CD pipeline (build → push → deploy → health-check gate) | ✅ |
+| Documented, tested rollback procedure, performed and screenshotted | ✅ |
+| Completed Phase 0 design worksheet (tier boundaries, tagging strategy, secrets plan) | ✅ |
+| Incident report (symptom, investigation trail, root cause, fix, design reflection) | ✅ |
+| Screenshots and live demo video of successful deploy and rollback | ✅ |
+| Public IP reachable, no ports beyond 80 exposed | ✅ |
+
+**Project complete and submitted.**
